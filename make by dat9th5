@@ -1,0 +1,173 @@
+--!nonstrict
+--==================================================================
+--  FTAP TOOL — FULL (Farther Reach + FOV + Silent Aim + FPS/Ping)
+--==================================================================
+
+--== SERVICES ==----------------------------------------------------
+local Players           = game:GetService("Players")
+local UserInputService  = game:GetService("UserInputService")
+local RunService        = game:GetService("RunService")
+local Workspace         = game:GetService("Workspace")
+local TweenService      = game:GetService("TweenService")
+local Stats             = game:GetService("Stats")
+
+local UIS = UserInputService
+local LP = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+if not Camera then
+    repeat task.wait() until Workspace.CurrentCamera
+    Camera = Workspace.CurrentCamera
+end
+
+--==================================================================
+-- 🌐 LOAD FARTHER REACH (script gốc)
+--==================================================================
+local reachLoaded = pcall(function()
+    loadstring(game:HttpGet(
+        "https://raw.githubusercontent.com/ultraskidding/luau/refs/heads/main/ftap/gamepassreach.lua"
+    ))()
+end)
+
+if reachLoaded then
+    print("[FTAP] Farther Reach loaded ✓")
+else
+    warn("[FTAP] Farther Reach FAILED — check HttpGet hoặc URL")
+end
+
+--== CONFIG ==------------------------------------------------------
+local CONFIG = {
+    DEFAULT_FOV  = 120,
+    MIN_FOV      = 60,
+    MAX_FOV      = 120,
+    SMOOTH       = true,
+    SMOOTH_TIME  = 0.25,
+    
+    AIM_ENABLED     = false,
+    AIM_DISTANCE    = 28,
+    AIM_UPDATE_RATE = 0.05,
+    
+    TOGGLE_KEY        = Enum.KeyCode.F,
+    STATS_UPDATE_RATE = 0.5,
+}
+
+local State = {
+    TargetFOV   = CONFIG.DEFAULT_FOV,
+    AimEnabled  = CONFIG.AIM_ENABLED,
+    AimDistance = CONFIG.AIM_DISTANCE,
+    UIVisible   = true,
+}
+
+local ScreenGui, MainFrame, DragBar, BtnClose, BtnOpen
+local FovLabel, FovFill, FovKnob
+local AimToggleBtn
+local StatsFrame, FpsLabel
+
+--==================================================================
+-- FOV
+--==================================================================
+local function setFOV(value)
+    value = math.clamp(value, CONFIG.MIN_FOV, CONFIG.MAX_FOV)
+    State.TargetFOV = value
+    
+    if CONFIG.SMOOTH then
+        TweenService:Create(Camera,
+            TweenInfo.new(CONFIG.SMOOTH_TIME, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            { FieldOfView = value }):Play()
+    else
+        Camera.FieldOfView = value
+    end
+    
+    if FovLabel then FovLabel.Text = "🎯 FOV: " .. math.floor(value + 0.5) end
+    if FovFill and FovKnob then
+        local r = (value - CONFIG.MIN_FOV) / (CONFIG.MAX_FOV - CONFIG.MIN_FOV)
+        FovFill.Size = UDim2.new(r, 0, 1, 0)
+        FovKnob.Position = UDim2.new(r, 0, 0.5, 0)
+    end
+end
+
+--==================================================================
+-- SILENT AIM
+--==================================================================
+local aimTargetPosition = nil
+local aimLastUpdate = 0
+local hookInstalled = false
+
+local function ensureCamera()
+    if not Camera or not Camera.Parent then
+        Camera = Workspace.CurrentCamera
+    end
+    return Camera
+end
+
+local function getReferencePos()
+    local ok, loc = pcall(function() return UIS:GetMouseLocation() end)
+    if ok then return loc end
+    local cam = ensureCamera()
+    if not cam then return nil end
+    local vp = cam.ViewportSize
+    return Vector2.new(vp.X * 0.5, vp.Y * 0.5)
+end
+
+local function updateAimTarget()
+    if not State.AimEnabled then
+        aimTargetPosition = nil
+        return
+    end
+    local cam = ensureCamera()
+    if not cam then aimTargetPosition = nil; return end
+    local refPos = getReferencePos()
+    if not refPos then aimTargetPosition = nil; return end
+    
+    local camPos = cam.CFrame.Position
+    local maxSq = State.AimDistance * State.AimDistance
+    local best, bestDist = nil, math.huge
+    
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP then
+            local char = plr.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then
+                    local part = char:FindFirstChild("HumanoidRootPart")
+                              or char:FindFirstChild("Torso")
+                              or char:FindFirstChild("Head")
+                    if part and part:IsA("BasePart") then
+                        local delta = part.Position - camPos
+                        if delta:Dot(delta) <= maxSq then
+                            local sp, onScreen = cam:WorldToViewportPoint(part.Position)
+                            if onScreen and sp.Z > 0 then
+                                local d = (Vector2.new(sp.X, sp.Y) - refPos).Magnitude
+                                if d < bestDist then
+                                    bestDist = d
+                                    best = part
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    aimTargetPosition = best and best.Position or nil
+end
+
+do
+    local ok, err = pcall(function()
+        local mt = getrawmetatable(game)
+        local oldNamecall = mt.__namecall
+        setreadonly(mt, false)
+        mt.__namecall = newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+            if State.AimEnabled and aimTargetPosition 
+               and self == Workspace and method == "Raycast" then
+                local args = { ... }
+                local origin = args[1]
+                if typeof(origin) == "Vector3" then
+                    local dir = aimTargetPosition - origin
+                    if dir.Magnitude > 1e-3 then
+                        args[2] = dir.Unit * State.AimDistance
+                        return oldNamecall(self, table.unpack(args))
+                    end
+                end
+            end
